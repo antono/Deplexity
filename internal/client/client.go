@@ -298,7 +298,7 @@ func (c *Client) GetRaw(ctx context.Context, path string) ([]byte, error) {
 // maxRawURLBody caps how much data GetRawURL will read into memory. Skill
 // SKILL.md bodies are small (KBs); this guards against a misdirected or
 // erroring pre-signed URL returning an unexpectedly large payload.
-const maxRawURLBody = 10 << 20 // 10 MB
+const maxRawURLBody int64 = 10 << 20 // 10 MB
 
 // GetRawURL fetches an absolute URL and returns the raw response body.
 //
@@ -312,6 +312,13 @@ const maxRawURLBody = 10 << 20 // 10 MB
 // failure (ErrNotAuthenticated): the target is a third-party URL, so such a
 // status typically means the pre-signed URL has expired.
 func (c *Client) GetRawURL(ctx context.Context, rawURL string) ([]byte, error) {
+	return c.GetRawURLMax(ctx, rawURL, maxRawURLBody)
+}
+
+// GetRawURLMax is GetRawURL with a caller-chosen body cap in bytes. It exists
+// for payloads larger than a SKILL.md body (e.g. uploaded thread attachments);
+// an oversized body is an error, never a silently truncated file.
+func (c *Client) GetRawURLMax(ctx context.Context, rawURL string, maxBody int64) ([]byte, error) {
 	// Validate the target before issuing any request. The URL originates from
 	// the (authenticated) Perplexity API, but we still refuse anything that is
 	// not an absolute https URL with a host: skill bodies are always fetched
@@ -402,13 +409,13 @@ func (c *Client) GetRawURL(ctx context.Context, rawURL string) ([]byte, error) {
 
 		// Read one byte past the cap so an oversized body is detected as an
 		// explicit error rather than silently truncated into a corrupt skill.
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxRawURLBody+1))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 		resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("could not read response from %s: %w", rawURL, err)
 		}
-		if len(body) > maxRawURLBody {
-			return nil, fmt.Errorf("response from %s exceeds %d byte cap", rawURL, maxRawURLBody)
+		if int64(len(body)) > maxBody {
+			return nil, fmt.Errorf("response from %s exceeds %d byte cap", rawURL, maxBody)
 		}
 
 		if resp.StatusCode != http.StatusOK {

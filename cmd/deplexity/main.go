@@ -77,8 +77,14 @@ type ExportCmd struct {
 	Delay      int      `help:"Delay between API requests in milliseconds." default:"500"`
 	Refresh    bool     `help:"Re-fetch the thread list and updated thread details." default:"false"`
 	PDFWorkers int      `help:"Number of parallel workers for PDF generation (0 = auto-detect CPU count)." default:"0" name:"pdf-workers"`
+	Attachments bool    `help:"Download files you uploaded to threads into threads/<thread>/attachments/." default:"false"`
 
 	verbose bool // set by main before Run
+}
+
+// Help implements kong.HelpProvider with details shown by "export --help".
+func (cmd *ExportCmd) Help() string {
+	return `--attachments also downloads the files you uploaded with your questions (images, documents) into threads/<thread>/attachments/ and links them from thread.json and thread.md. It is off by default because it can be a lot of data. The first run with --attachments re-fetches every cached thread once, because download links are short-lived and cannot be reused later. Attachments that fail to download are listed in manifest.json and retried on the next run. PDFs do not include attachments.`
 }
 
 func (cmd *ExportCmd) Run(ctx context.Context) error {
@@ -86,6 +92,9 @@ func (cmd *ExportCmd) Run(ctx context.Context) error {
 	delay, err := requestDelay(cmd.Delay)
 	if err != nil {
 		return err
+	}
+	if cmd.Attachments && !cmd.Threads {
+		return fmt.Errorf("--attachments requires thread export; remove --no-threads")
 	}
 
 	session, err := auth.LoadSession()
@@ -129,8 +138,22 @@ func (cmd *ExportCmd) Run(ctx context.Context) error {
 	var threads []models.Thread
 	var threadFailures []models.ThreadExportFailure
 	if cmd.Threads && len(threadRefs) > 0 {
+		var downloader *export.AttachmentDownloader
+		if cmd.Attachments {
+			downloader = &export.AttachmentDownloader{
+				OutputDir: cmd.Output,
+				Client:    c,
+				Warn: func(format string, args ...any) {
+					fmt.Fprintf(os.Stderr, "\n  Warning: "+format+"\n", args...)
+				},
+			}
+		}
 		getThread := func(ctx context.Context, uuid string, resume *models.Thread, onPage func(*models.Thread) error) (*models.Thread, error) {
-			return api.GetThread(ctx, c, uuid, resume, onPage)
+			var opts []api.ThreadOption
+			if downloader != nil {
+				opts = append(opts, api.WithAttachmentHook(downloader.Hook(uuid, uuid)))
+			}
+			return api.GetThread(ctx, c, uuid, resume, onPage, opts...)
 		}
 		threads, threadFailures, err = cmd.fetchThreadDetails(ctx, jsonExp, threadRefs, getThread)
 		if persistErr := persistThreadRetryState(jsonExp, threadRefs); persistErr != nil {
@@ -219,6 +242,10 @@ func (cmd *ExportCmd) Run(ctx context.Context) error {
 	// Write the manifest before reporting a partial thread failure so successful
 	// output remains usable and the incomplete run is machine-detectable.
 	manifest := buildManifest(cmd.Format, threads, spaces, account, len(threadRefs), threadFailures)
+	if cmd.Attachments {
+		manifest.Attachments = summarizeAttachments(threads)
+		reportAttachments(manifest.Attachments)
+	}
 
 	if err := finalizeExport(jsonExp, manifest); err != nil {
 		return err
@@ -421,7 +448,7 @@ func (cmd *ExportCmd) fetchThreadDetails(ctx context.Context, jsonExp *export.JS
 	failuresByUUID := make(map[string]models.ThreadExportFailure)
 	for i, ref := range refs {
 		cached, err := jsonExp.LoadCompleteThread(ref.UUID)
-		if needsThreadFetch(cmd.Refresh, ref, cached, err) {
+		if needsThreadFetch(cmd.Refresh, ref, cached, err) || cmd.needsAttachmentFetch(jsonExp, cached) {
 			missing = append(missing, i)
 			refs[i].RetryRequired = true
 		}
@@ -523,6 +550,54 @@ func needsThreadFetch(refresh bool, ref models.ThreadRef, cached *models.Thread,
 		return true
 	}
 	return refresh && (ref.UpdatedAt.IsZero() || ref.PreviousUpdatedAt.IsZero() || ref.UpdatedAt.After(ref.PreviousUpdatedAt))
+}
+
+// needsAttachmentFetch reports whether a cached, otherwise up-to-date thread
+// must be fetched again to collect its attachments. Download links are
+// short-lived, so attachments can only be saved while a thread is being fetched:
+// a cache written without --attachments, or one whose files are missing or
+// failed, has to be fetched again.
+func (cmd *ExportCmd) needsAttachmentFetch(jsonExp *export.JSONExporter, cached *models.Thread) bool {
+	if !cmd.Attachments || cached == nil {
+		return false
+	}
+	return !cached.AttachmentsFetched || !jsonExp.AttachmentsPresent(cached)
+}
+
+// summarizeAttachments builds the manifest note about attachment export.
+func summarizeAttachments(threads []models.Thread) *models.AttachmentsSummary {
+	summary := &models.AttachmentsSummary{Enabled: true, Complete: true}
+	for _, t := range threads {
+		if !t.AttachmentsFetched {
+			summary.Complete = false
+		}
+		for _, e := range t.Entries {
+			for _, a := range e.Attachments {
+				if a.File != "" && a.Error == "" {
+					summary.Downloaded++
+					continue
+				}
+				summary.Complete = false
+				errText := a.Error
+				if errText == "" {
+					errText = "not downloaded"
+				}
+				summary.Failed = append(summary.Failed, models.AttachmentFailure{ThreadUUID: t.UUID, EntryUUID: e.UUID, Name: a.Name, Error: errText})
+			}
+		}
+	}
+	return summary
+}
+
+func reportAttachments(summary *models.AttachmentsSummary) {
+	if summary == nil {
+		return
+	}
+	fmt.Printf("Attachments: %d downloaded", summary.Downloaded)
+	if len(summary.Failed) > 0 {
+		fmt.Printf(", %d failed (see manifest.json; re-run to retry)", len(summary.Failed))
+	}
+	fmt.Println()
 }
 
 func attachPreviousUpdatedAt(refs []models.ThreadRef, previous []models.ThreadRef) {

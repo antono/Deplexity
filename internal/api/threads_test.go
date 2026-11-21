@@ -402,3 +402,127 @@ func TestGetThreadHonorsCancellation(t *testing.T) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
+
+func attachmentEntry(uuid string, urls ...string) ThreadEntry {
+	return ThreadEntry{UUID: uuid, QueryStr: "q " + uuid, Attachments: urls}
+}
+
+func TestGetThreadIgnoresAttachmentsWithoutHook(t *testing.T) {
+	getter := &threadGetter{responses: []ThreadDetailResponse{{
+		Entries:    []ThreadEntry{attachmentEntry("entry-1", "https://files.example.com/a/b/photo.jpg?X-Amz-Signature=secret")},
+		NextCursor: cursorPtr(""),
+	}}}
+
+	thread, err := GetThread(context.Background(), getter, "thread-1", nil, nil)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if len(thread.Entries[0].Attachments) != 0 {
+		t.Errorf("attachments = %+v, want none when the option is off", thread.Entries[0].Attachments)
+	}
+	if thread.AttachmentsFetched {
+		t.Error("AttachmentsFetched = true without the hook")
+	}
+}
+
+func TestGetThreadPassesNewEntriesToAttachmentHook(t *testing.T) {
+	getter := &threadGetter{responses: []ThreadDetailResponse{
+		{
+			Entries:     []ThreadEntry{attachmentEntry("entry-1", "https://files.example.com/a/b/photo%20one.jpg?X-Amz-Signature=secret")},
+			HasNextPage: true,
+			NextCursor:  cursorPtr("cursor-1"),
+		},
+		{
+			// The cursor boundary re-serves entry-1; it must not be processed twice.
+			Entries:    []ThreadEntry{attachmentEntry("entry-1", "https://files.example.com/a/b/photo%20one.jpg?X-Amz-Signature=other"), attachmentEntry("entry-2"), attachmentEntry("entry-3", "https://files.example.com/c/d/notes.pdf?x=1", "")},
+			NextCursor: cursorPtr(""),
+		},
+	}}
+
+	var seen []string
+	hook := func(_ context.Context, e *models.Entry) error {
+		for _, a := range e.Attachments {
+			seen = append(seen, e.UUID+":"+a.Name+":"+a.URL)
+		}
+		return nil
+	}
+	thread, err := GetThread(context.Background(), getter, "thread-1", nil, nil, WithAttachmentHook(hook))
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+
+	want := []string{
+		"entry-1:photo one.jpg:https://files.example.com/a/b/photo%20one.jpg?X-Amz-Signature=secret",
+		"entry-3:notes.pdf:https://files.example.com/c/d/notes.pdf?x=1",
+	}
+	if !reflect.DeepEqual(seen, want) {
+		t.Errorf("hook saw %v, want %v", seen, want)
+	}
+	if len(thread.Entries) != 3 {
+		t.Fatalf("got %d entries, want 3", len(thread.Entries))
+	}
+	if !thread.AttachmentsFetched {
+		t.Error("AttachmentsFetched = false, want true when the hook ran")
+	}
+}
+
+func TestGetThreadAbortsWhenAttachmentHookFails(t *testing.T) {
+	getter := &threadGetter{responses: []ThreadDetailResponse{{
+		Entries:    []ThreadEntry{attachmentEntry("entry-1", "https://files.example.com/a/b/photo.jpg")},
+		NextCursor: cursorPtr(""),
+	}}}
+	boom := errors.New("cancelled")
+	hook := func(context.Context, *models.Entry) error { return boom }
+
+	if _, err := GetThread(context.Background(), getter, "thread-1", nil, nil, WithAttachmentHook(hook)); !errors.Is(err, boom) {
+		t.Fatalf("GetThread error = %v, want hook error", err)
+	}
+}
+
+func TestGetThreadRestartsCheckpointWithoutAttachments(t *testing.T) {
+	// The checkpoint was written by a run without attachment export, so its
+	// entries never had their attachments collected; resuming would lose them.
+	getter := &threadGetter{responses: []ThreadDetailResponse{{
+		Entries:    []ThreadEntry{attachmentEntry("entry-1", "https://files.example.com/a/b/photo.jpg")},
+		NextCursor: cursorPtr(""),
+	}}}
+	resume := &models.Thread{UUID: "thread-1", Entries: []models.Entry{{UUID: "entry-1"}}, NextCursor: "cursor-1"}
+	hook := func(context.Context, *models.Entry) error { return nil }
+
+	thread, err := GetThread(context.Background(), getter, "thread-1", resume, nil, WithAttachmentHook(hook))
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if strings.Contains(getter.paths[0], "cursor=") {
+		t.Errorf("first request = %q, want a restart from the first page", getter.paths[0])
+	}
+	if len(thread.Entries[0].Attachments) != 1 {
+		t.Errorf("attachments = %+v, want the entry's attachment collected", thread.Entries[0].Attachments)
+	}
+}
+
+func TestGetThreadResumeKeepsAttachmentsFetchedOnlyWhenCheckpointHadThem(t *testing.T) {
+	page := ThreadDetailResponse{Entries: []ThreadEntry{{UUID: "entry-2"}}, NextCursor: cursorPtr("")}
+	resume := &models.Thread{UUID: "thread-1", Entries: []models.Entry{{UUID: "entry-1"}}, NextCursor: "cursor-1", AttachmentsFetched: true}
+	hook := func(context.Context, *models.Entry) error { return nil }
+
+	// With the hook, resuming a checkpoint that had attachments continues from the cursor.
+	getter := &threadGetter{responses: []ThreadDetailResponse{page}}
+	thread, err := GetThread(context.Background(), getter, "thread-1", resume, nil, WithAttachmentHook(hook))
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if !strings.Contains(getter.paths[0], "cursor=cursor-1") || !thread.AttachmentsFetched {
+		t.Errorf("path = %q, fetched = %t, want resume at cursor-1 with attachments", getter.paths[0], thread.AttachmentsFetched)
+	}
+
+	// Without the hook the new entries have no attachments, so the flag must be dropped.
+	getter = &threadGetter{responses: []ThreadDetailResponse{page}}
+	thread, err = GetThread(context.Background(), getter, "thread-1", resume, nil)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if thread.AttachmentsFetched {
+		t.Error("AttachmentsFetched = true after a run without the hook")
+	}
+}

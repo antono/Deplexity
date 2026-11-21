@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -663,5 +664,116 @@ func TestFinalizeExportWritesPartialManifestBeforeReturningError(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"threads_complete": false`) || !strings.Contains(string(raw), `"uuid": "thread-2"`) {
 		t.Fatalf("manifest = %s, want partial status and failed thread", raw)
+	}
+}
+
+func TestNeedsAttachmentFetch(t *testing.T) {
+	out := t.TempDir()
+	jsonExp := &export.JSONExporter{OutputDir: out}
+
+	withFile := func(t *testing.T) *models.Thread {
+		t.Helper()
+		thread := &models.Thread{UUID: "thread-1", Slug: "chat", Complete: true, AttachmentsFetched: true,
+			Entries: []models.Entry{{Attachments: []models.Attachment{{Name: "photo.jpg", File: "attachments/ab12cd34-photo.jpg", Size: 4}}}}}
+		if err := jsonExp.ExportThread(thread); err != nil {
+			t.Fatalf("ExportThread: %v", err)
+		}
+		return thread
+	}
+
+	t.Run("flag off never refetches", func(t *testing.T) {
+		cmd := &ExportCmd{}
+		if cmd.needsAttachmentFetch(jsonExp, &models.Thread{Complete: true}) {
+			t.Error("needsAttachmentFetch = true with --attachments off")
+		}
+	})
+	t.Run("cache written without attachments", func(t *testing.T) {
+		cmd := &ExportCmd{Attachments: true}
+		if !cmd.needsAttachmentFetch(jsonExp, &models.Thread{Complete: true}) {
+			t.Error("needsAttachmentFetch = false, want a one-time refetch of a pre-attachments cache")
+		}
+	})
+	t.Run("missing cache is left to the normal check", func(t *testing.T) {
+		cmd := &ExportCmd{Attachments: true}
+		if cmd.needsAttachmentFetch(jsonExp, nil) {
+			t.Error("needsAttachmentFetch = true for a nil cache")
+		}
+	})
+	t.Run("recorded file is missing on disk", func(t *testing.T) {
+		cmd := &ExportCmd{Attachments: true}
+		if !cmd.needsAttachmentFetch(jsonExp, withFile(t)) {
+			t.Error("needsAttachmentFetch = false, want a refetch when the file is gone")
+		}
+	})
+	t.Run("recorded file present", func(t *testing.T) {
+		cmd := &ExportCmd{Attachments: true}
+		thread := withFile(t)
+		dir := filepath.Join(out, "threads")
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("thread dir missing: %v", err)
+		}
+		attDir := filepath.Join(dir, entries[0].Name(), "attachments")
+		if err := os.MkdirAll(attDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(attDir, "ab12cd34-photo.jpg"), []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if cmd.needsAttachmentFetch(jsonExp, thread) {
+			t.Error("needsAttachmentFetch = true although every attachment is on disk")
+		}
+	})
+}
+
+func TestSummarizeAttachments(t *testing.T) {
+	threads := []models.Thread{
+		{UUID: "t1", AttachmentsFetched: true, Entries: []models.Entry{
+			{UUID: "e1", Attachments: []models.Attachment{{Name: "a.jpg", File: "attachments/x-a.jpg", Size: 137}}},
+			{UUID: "e2", Attachments: []models.Attachment{{Name: "b.pdf", Error: "HTTP 403"}, {Name: "c.png"}}},
+		}},
+		{UUID: "t2", AttachmentsFetched: true},
+	}
+	got := summarizeAttachments(threads)
+	if !got.Enabled || got.Complete || got.Downloaded != 1 || len(got.Failed) != 2 {
+		t.Fatalf("summary = %+v, want enabled, incomplete, 1 downloaded, 2 failed", got)
+	}
+	if f := got.Failed[0]; f.ThreadUUID != "t1" || f.EntryUUID != "e2" || f.Name != "b.pdf" || f.Error != "HTTP 403" {
+		t.Errorf("failure = %+v", f)
+	}
+	if f := got.Failed[1]; f.Error != "not downloaded" {
+		t.Errorf("failure without a reason = %+v, want a placeholder", f)
+	}
+
+	clean := summarizeAttachments(threads[1:])
+	if !clean.Complete || clean.Downloaded != 0 || len(clean.Failed) != 0 {
+		t.Errorf("clean summary = %+v, want complete", clean)
+	}
+	if got := summarizeAttachments([]models.Thread{{UUID: "t3"}}); got.Complete {
+		t.Error("a thread fetched without attachments must make the summary incomplete")
+	}
+}
+
+func TestManifestOmitsAttachmentsByDefault(t *testing.T) {
+	manifest := buildManifest([]string{"json"}, nil, nil, nil, 0, nil)
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "attachments") {
+		t.Errorf("manifest without --attachments mentions attachments: %s", data)
+	}
+	manifest.Attachments = summarizeAttachments(nil)
+	data, _ = json.Marshal(manifest)
+	if !strings.Contains(string(data), `"attachments":{"enabled":true,"complete":true,"downloaded":0}`) {
+		t.Errorf("manifest = %s, want the attachments note", data)
+	}
+}
+
+func TestExportRejectsAttachmentsWithoutThreads(t *testing.T) {
+	cmd := &ExportCmd{Attachments: true, Threads: false, Delay: 500}
+	err := cmd.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "--attachments requires thread export") {
+		t.Fatalf("Run error = %v, want --attachments to require threads", err)
 	}
 }

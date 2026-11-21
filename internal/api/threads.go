@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"path"
 	"time"
 
 	"github.com/clappingmonkey/deplexity/internal/models"
@@ -113,6 +114,46 @@ func threadPagePath(uuid, cursor string) string {
 	return path
 }
 
+// EntryHook is called by GetThread for every newly fetched entry, right after
+// the page containing it arrives. Attachment URLs are pre-signed and expire
+// within minutes, so downloads must happen here rather than after the whole
+// thread has been fetched. An error aborts the thread fetch.
+type EntryHook func(ctx context.Context, entry *models.Entry) error
+
+// ThreadOption customises GetThread.
+type ThreadOption func(*threadOptions)
+
+type threadOptions struct {
+	entryHook EntryHook
+}
+
+// WithAttachmentHook makes GetThread record each entry's uploaded attachments
+// and pass the entry to hook so it can download them. Without this option
+// attachments are ignored and the exported output is unchanged.
+func WithAttachmentHook(hook EntryHook) ThreadOption {
+	return func(o *threadOptions) { o.entryHook = hook }
+}
+
+// toAttachments converts attachment URLs into models. The file name is the
+// last path segment of the URL.
+func toAttachments(urls []string) []models.Attachment {
+	var out []models.Attachment
+	for _, raw := range urls {
+		if raw == "" {
+			continue
+		}
+		name := ""
+		if u, err := url.Parse(raw); err == nil {
+			name = path.Base(u.Path)
+			if name == "." || name == "/" {
+				name = ""
+			}
+		}
+		out = append(out, models.Attachment{Name: name, URL: raw})
+	}
+	return out
+}
+
 // toEntry converts a raw API thread entry into the exported model.
 func toEntry(e ThreadEntry) models.Entry {
 	entry := models.Entry{
@@ -164,8 +205,21 @@ func toEntry(e ThreadEntry) models.Entry {
 // of restarting. onPage, when non-nil, is called after each fetched page so the
 // caller can checkpoint progress; a page fetch failure leaves the last
 // checkpoint on disk to be resumed by a later run.
-func GetThread(ctx context.Context, c getter, uuid string, resume *models.Thread, onPage func(*models.Thread) error) (*models.Thread, error) {
+func GetThread(ctx context.Context, c getter, uuid string, resume *models.Thread, onPage func(*models.Thread) error, opts ...ThreadOption) (*models.Thread, error) {
+	var o threadOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	// A checkpoint written without attachment export has entries whose
+	// attachments were never collected, so it cannot be continued with them.
+	if resume != nil && o.entryHook != nil && !resume.AttachmentsFetched {
+		resume = nil
+	}
+
 	thread := &models.Thread{UUID: uuid, Slug: uuid}
+	// AttachmentsFetched must only claim what this run (and the checkpoint it
+	// resumes from) actually collected.
+	thread.AttachmentsFetched = o.entryHook != nil && (resume == nil || resume.AttachmentsFetched)
 	cursor := ""
 	seen := make(map[string]bool)
 	// seenCursors bounds the loop: the endpoint is reverse-engineered, so a
@@ -215,7 +269,14 @@ func GetThread(ctx context.Context, c getter, uuid string, resume *models.Thread
 				continue
 			}
 			seen[e.UUID] = true
-			thread.Entries = append(thread.Entries, toEntry(e))
+			entry := toEntry(e)
+			if o.entryHook != nil {
+				entry.Attachments = toAttachments(e.Attachments)
+				if err := o.entryHook(ctx, &entry); err != nil {
+					return nil, fmt.Errorf("failed to process entry %s of thread %s: %w", e.UUID, uuid, err)
+				}
+			}
+			thread.Entries = append(thread.Entries, entry)
 		}
 
 		// The thread ends when the API reports no further page or omits the

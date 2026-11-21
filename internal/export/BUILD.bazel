@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "export",
     srcs = [
+        "attachments.go",
         "json.go",
         "markdown.go",
         "pdf.go",
@@ -22,6 +23,7 @@ go_library(
 go_test(
     name = "export_test",
     srcs = [
+        "attachments_test.go",
         "json_test.go",
         "markdown_test.go",
         "pdf_test.go",

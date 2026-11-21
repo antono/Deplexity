@@ -637,3 +637,30 @@ func TestNewClient(t *testing.T) {
 		t.Errorf("delay = %v, want %v", c.delay, DefaultDelay)
 	}
 }
+
+func TestGetRawURLMaxHonorsCallerCap(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(make([]byte, 137))
+	}))
+	defer srv.Close()
+
+	c := &Client{http: srv.Client(), baseURL: "https://www.perplexity.ai", delay: 0}
+
+	body, err := c.GetRawURLMax(context.Background(), srv.URL+"/file.bin", 137)
+	if err != nil || len(body) != 137 {
+		t.Fatalf("GetRawURLMax at the cap = %d bytes, %v; want 137 bytes", len(body), err)
+	}
+	if _, err := c.GetRawURLMax(context.Background(), srv.URL+"/file.bin", 136); err == nil {
+		t.Fatal("GetRawURLMax accepted a body over the cap, want error")
+	}
+	// Payloads above the skill-body cap are fine when the caller allows them.
+	big := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(make([]byte, maxRawURLBody+1))
+	}))
+	defer big.Close()
+	c = &Client{http: big.Client(), baseURL: "https://www.perplexity.ai", delay: 0}
+	if _, err := c.GetRawURLMax(context.Background(), big.URL+"/big.bin", maxRawURLBody*2); err != nil {
+		t.Fatalf("GetRawURLMax with a larger cap: %v", err)
+	}
+}

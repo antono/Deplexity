@@ -213,6 +213,9 @@ func (e *JSONExporter) ExportSpaces(ctx context.Context, spaces []models.Space, 
 					return err
 				}
 			}
+			if err := copyThreadAttachments(ctx, e.OutputDir, threadDir, thread); err != nil {
+				return err
+			}
 		}
 	}
 

@@ -28,6 +28,11 @@ type Thread struct {
 	// NextCursor is the pagination cursor to resume from when Complete is
 	// false. The entries already fetched are persisted alongside it.
 	NextCursor string `json:"next_cursor,omitempty"`
+	// AttachmentsFetched records that uploaded attachments were collected for
+	// every entry stored in this thread (up to NextCursor when incomplete). It
+	// is only set by runs with attachment export enabled, so a cache written
+	// without it is refetched when attachments are requested later.
+	AttachmentsFetched bool `json:"attachments_fetched,omitempty"`
 }
 
 // Entry represents a single query-response pair within a thread.
@@ -39,6 +44,27 @@ type Entry struct {
 	Model       string    `json:"model,omitempty"`
 	SearchFocus string    `json:"search_focus,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Attachments lists files the user uploaded with this query. Only
+	// populated when attachment export is enabled.
+	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+// Attachment is a file the user uploaded with a query.
+type Attachment struct {
+	// Name is the original file name.
+	Name string `json:"name"`
+	// File is the path of the downloaded copy relative to the thread
+	// directory (for example "attachments/1a2b3c4d-photo.jpg"). Empty when the
+	// download failed.
+	File string `json:"file,omitempty"`
+	// Size is the size of the downloaded file in bytes.
+	Size int64 `json:"size,omitempty"`
+	// Error describes why the download failed. Failed attachments are retried
+	// on the next run.
+	Error string `json:"error,omitempty"`
+	// URL is the short-lived pre-signed download link. It carries credentials,
+	// so it is never persisted.
+	URL string `json:"-"`
 }
 
 // Source represents a citation/reference from an answer.
@@ -129,6 +155,24 @@ type ExportManifest struct {
 	ExpectedThreads int                   `json:"expected_threads"`
 	FailedThreads   []ThreadExportFailure `json:"failed_threads,omitempty"`
 	ThreadIndex     map[string]string     `json:"thread_index,omitempty"` // uuid -> slug
+	// Attachments is present only when the run was started with --attachments.
+	Attachments *AttachmentsSummary `json:"attachments,omitempty"`
+}
+
+// AttachmentsSummary reports the outcome of attachment export in manifest.json.
+type AttachmentsSummary struct {
+	Enabled    bool                `json:"enabled"`
+	Complete   bool                `json:"complete"`
+	Downloaded int                 `json:"downloaded"`
+	Failed     []AttachmentFailure `json:"failed,omitempty"`
+}
+
+// AttachmentFailure identifies an attachment that could not be downloaded.
+type AttachmentFailure struct {
+	ThreadUUID string `json:"thread_uuid"`
+	EntryUUID  string `json:"entry_uuid"`
+	Name       string `json:"name"`
+	Error      string `json:"error"`
 }
 
 // ThreadExportFailure identifies a thread that could not be exported during a run.

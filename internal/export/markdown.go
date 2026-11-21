@@ -3,6 +3,7 @@ package export
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -59,6 +60,15 @@ func writeThreadMarkdown(dir string, thread *models.Thread) error {
 		// Question
 		sb.WriteString(fmt.Sprintf("## Q: %s\n\n", entry.Query))
 
+		// Attachments uploaded with the question
+		if len(entry.Attachments) > 0 {
+			sb.WriteString("### Attachments\n\n")
+			for _, a := range entry.Attachments {
+				sb.WriteString(attachmentMarkdownLine(a))
+			}
+			sb.WriteString("\n")
+		}
+
 		// Answer
 		sb.WriteString(fmt.Sprintf("%s\n\n", entry.Answer))
 
@@ -91,6 +101,26 @@ func writeThreadMarkdown(dir string, thread *models.Thread) error {
 	}
 
 	return nil
+}
+
+// attachmentMarkdownLine renders one attachment as a list item linking to the
+// downloaded copy, or noting that it could not be downloaded.
+func attachmentMarkdownLine(a models.Attachment) string {
+	name := a.Name
+	if name == "" {
+		name = "attachment"
+	}
+	if a.File == "" {
+		if a.Error != "" {
+			return fmt.Sprintf("- %s — not downloaded: %s\n", name, a.Error)
+		}
+		return fmt.Sprintf("- %s — not downloaded\n", name)
+	}
+	parts := strings.Split(a.File, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return fmt.Sprintf("- [%s](%s) (%d bytes)\n", name, strings.Join(parts, "/"), a.Size)
 }
 
 // ExportSpaces writes a summary Markdown file for all spaces and copies thread markdown into each space folder.
@@ -192,6 +222,9 @@ func (e *MarkdownExporter) ExportSpaces(ctx context.Context, spaces []models.Spa
 			}
 			threadDir := filepath.Join(spaceDir, "threads", sanitizeFilename(threadSlug(thread)))
 			if err := writeThreadMarkdown(threadDir, thread); err != nil {
+				return err
+			}
+			if err := copyThreadAttachments(ctx, e.OutputDir, threadDir, thread); err != nil {
 				return err
 			}
 		}

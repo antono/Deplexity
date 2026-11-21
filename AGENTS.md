@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## About this fork
+
+This is a **hard fork** of [clappingmonkey/Deplexity](https://github.com/clappingmonkey/Deplexity) based on commit `b436a58` (just before upstream PR #75, "preserve thread slugs"). It deliberately keeps the v0.3.0 output layout, where each thread lives in `threads/<uuid>/`, so existing archives keep working without being re-downloaded or duplicated. Upstream's slug-and-hash layout (`threads/<slug>-<identity>/`) is not adopted, and later upstream changes that depend on it are not merged. On top of that base the fork adds `--attachments`.
+
 ## Build & Run
 
 ```bash
@@ -43,6 +47,7 @@ Binary entrypoint: `cmd/deplexity/main.go`. Version/buildTime stamped via `x_def
 - `internal/client/ratelimit.go` — `RetryWithBackoff`, `computeBackoff`, shared retry constants.
 - `internal/export/` — JSON, Markdown, and PDF exporters. PDF uses `gpdf` (pure Go, zero dependencies). JSON exporter handles `thread_index.json` persistence for resumable exports. All exporters copy thread files into space folders for self-contained output.
 - `internal/export/util.go` — shared helpers: `sanitizeFilename`, `threadSlug`, `spaceDirNames` (identity-suffixed, collision-free space directories shared by all exporters), and `skillFilenames`/`shortID` (collision-free `.md` filenames for a space's skills, disambiguated by a short skill-ID suffix; used by both the JSON and Markdown exporters so their sidecar paths and links agree).
+- `internal/export/attachments.go` — `--attachments` support. `AttachmentDownloader.Hook(slug, uuid)` is passed to `api.GetThread` (via `api.WithAttachmentHook`) and downloads each new entry's uploaded files into `threads/<thread>/attachments/` right after the page arrives, because the pre-signed URLs expire in ~10 minutes. Names are `<sha256(URL path)[:8]>-<sanitized original>` (stable across refetches, so existing files are reused). Failures are recorded on `models.Attachment.Error` (credentials redacted), never fail the thread, and are retried next run; only cancellation aborts. `JSONExporter.AttachmentsPresent` tells a later run whether a cached thread still has all its files. `copyThreadAttachments` mirrors files into space folders.
 - CLI framework: `alecthomas/kong` (struct-tag based). Commands defined as types with `Run(ctx context.Context) error` methods in `main.go`.
 
 ## Browser Dependency
@@ -77,6 +82,8 @@ All endpoints are reverse-engineered from browser DevTools (May 2026, API versio
 | GET | `/rest/rate-limit/all` | Rate limits per model |
 | POST | `/rest/files/list` | Uploaded files (not yet implemented) |
 
+`GET /rest/thread/{uuid}` entries carry `attachments`: a list of pre-signed S3 URLs (`ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/...`, `X-Amz-Expires=600`) for files uploaded with that query. They are also listed as `web_results` with `is_attachment: true`, which is ignored. Fetch them without the session cookie via `Client.GetRawURLMax`.
+
 ### Thread Content Structure
 
 Answer content is in `entries[].blocks[]` where `intended_usage == "ask_text_0_markdown"` → `markdown_block.answer`.
@@ -85,11 +92,14 @@ Answer content is in `entries[].blocks[]` where `intended_usage == "ask_text_0_m
 
 1. **Phase 1 — Index**: `POST /rest/thread/list_ask_threads` with pagination (limit=20, ascending=false). Dual stop condition: `len(response) < limit` (primary) + current-run all-duplicates (safety net). Result cached in `thread_index.json` with `Complete: true` flag. An incomplete index is never resumed from its count as an offset because the newest-first list can reorder between runs; the next run re-lists from offset 0 and carries retry metadata forward by UUID.
 2. **Phase 2 — Details**: `GET /rest/thread/{uuid}` for each thread. Skips threads already fetched on disk. Ordinary per-thread fetch/write failures preserve and render successful threads, but `manifest.json` records `threads_complete: false`, `expected_threads`, and ordered `failed_threads`, and the command exits non-zero after writing the manifest. Cancellation/deadline errors abort immediately and take precedence over accumulated failures. A failed `--refresh` must not count a stale cached thread as a current success. Adaptive rate limiting: delay doubles after 429, halves after 20 consecutive successes.
+   With `--attachments`, `GetThread` records each entry's `attachments` and hands the entry to the download hook; the thread is marked `attachments_fetched`. A cached thread is fetched again when that flag is missing or a recorded file is gone or failed (`needsAttachmentFetch`), and a resume checkpoint without the flag restarts from the first page. `manifest.json` gets an `attachments` summary (`enabled`, `complete`, `downloaded`, `failed`) only when the flag is used.
 3. **Phase 3 — Render**: Convert domain models to JSON/Markdown/PDF. Write threads to `threads/<slug>/` (canonical flat list). Copy thread files into `spaces/<name>-<short-id>/threads/<slug>/` so each space folder is self-contained without name collisions. Account-wide global skills are written **once** under `account/`: `account/account.json` (JSON) + `account/global-skills.md` (Markdown), with each skill body in `account/skills/<name>.md`. They are not duplicated per space.
 
 Use `--refresh` to force re-fetching the thread index.
 
 ## Gotchas
+
+- Never persist `models.Attachment.URL` (`json:"-"`) or put a pre-signed URL in an error message: the query string carries an AWS session token. `redactURL` strips it.
 
 - `has_next_page` from the API is always `true` even on the last page — useless, ignored.
 - `total_threads` reports incorrect counts (e.g., 99 when actual is 692) — unreliable, ignored.

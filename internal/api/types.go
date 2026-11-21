@@ -196,6 +196,8 @@ type ThreadEntry struct {
 	RelatedQueries  []string `json:"related_queries"`
 	CreatedAt       string  `json:"entry_created_datetime"`
 	UpdatedAt       string  `json:"entry_updated_datetime"`
+	// Attachments are short-lived pre-signed URLs of files uploaded with the query.
+	Attachments []string `json:"attachments"`
 }
 
 // Block represents a content block within an entry.

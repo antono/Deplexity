@@ -94,6 +94,16 @@ func spaceIdentitySuffix(identity string) string {
 }
 
 // threadSlug returns the slug (or UUID fallback) for a thread's directory name.
+// threadDirName returns the directory component for a thread: the sanitized
+// slug, or the UUID when the thread has none. It matches the layout used by
+// threadDir/ExportThread and by the spaces' thread copies.
+func threadDirName(slug, uuid string) string {
+	if slug == "" {
+		slug = uuid
+	}
+	return sanitizeFilename(slug)
+}
+
 func threadSlug(t *models.Thread) string {
 	if t.Slug != "" {
 		return t.Slug

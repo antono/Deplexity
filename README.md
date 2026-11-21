@@ -4,6 +4,28 @@
 
 Deplexity is a CLI tool that authenticates via your browser session and exports all your Perplexity AI data into portable formats (JSON, Markdown, PDF). Built in pure Go with zero runtime dependencies.
 
+> ## About this fork
+>
+> This is a **hard fork** of [clappingmonkey/Deplexity](https://github.com/clappingmonkey/Deplexity). It starts from upstream commit [`b436a58`](https://github.com/clappingmonkey/Deplexity/commit/b436a58) (v0.3.0 plus ten commits), the last one before upstream PR [#75 "preserve thread slugs"](https://github.com/clappingmonkey/Deplexity/pull/75), and does not include that change or anything built on top of it.
+>
+> **Why.** In the fork maintainer's opinion, #75 made a bad trade-off. It moved each thread from `threads/<uuid>/` to `threads/<slug>-<uuid-prefix>-<sha256>/`, and that has real costs for anyone keeping an archive:
+>
+> - The directory name is long and no more readable than a UUID, because of the hash suffix.
+> - The name depends on a slug that Perplexity can change, so a thread can move to a new directory later.
+> - Existing archives are not migrated. Old directories are deliberately kept next to the new ones, so upgrading re-downloads every thread and leaves a full duplicate of the archive, and a slug change leaves another stale copy behind.
+> - For an archive that lives in git or is indexed by a search tool, that duplication is clutter that has to be cleaned up by hand.
+>
+> This fork keeps the original layout: one stable, never-moving `threads/<uuid>/` per thread, compatible with archives made before #75.
+>
+> **What differs from upstream**
+>
+> - Adds `--attachments` to download files you uploaded to threads (see [Uploaded attachments](#uploaded-attachments)).
+> - Includes upstream fixes [#76](https://github.com/clappingmonkey/Deplexity/pull/76) (cancellable request pacing), [#79](https://github.com/clappingmonkey/Deplexity/pull/79) (no extra backoff after the last retry) and [#86](https://github.com/clappingmonkey/Deplexity/pull/86) (require session user identity).
+> - Does not include #75, and therefore no upstream release from v0.4.0 on. Two later upstream changes cannot be applied on this base because they build on the new code: #80 (interruptible PDF rendering) and #108 (incremental PDF export).
+> - Upstream #81 (exported bookmark count) and #84 (remove stale source sidecars) are independent of the layout but are not merged yet. Note that #81 also adds a cache version marker, which would make archives created before it be downloaded once more.
+>
+> Upstream changes are merged only when they do not require the new layout.
+
 <p align="center">
   <img src="demo.gif" alt="Deplexity demo — exporting Perplexity threads to JSON, Markdown, and PDF" width="800">
 </p>
@@ -110,6 +132,27 @@ deplexity export --delay 1000
 deplexity export -f pdf --pdf-workers 4
 ```
 
+Files you uploaded with your questions (images, documents) are not exported by
+default. Add `--attachments` to download them:
+
+```bash
+deplexity export --attachments
+```
+
+They go into `threads/<thread-id>/attachments/`. Each file is named
+`<8-hex-id>-<original-name>`, where the id keeps equal names from overwriting each
+other. Every entry in `thread.json` lists its attachments (`name`, `file`, `size`),
+and `thread.md` links them under an **Attachments** heading. Space folders get their
+own copy of each thread's attachments. Attachments are not included in PDFs.
+
+Perplexity serves uploads through pre-signed links that expire after about ten
+minutes, so a file can only be saved while its thread is being fetched. The first
+run with `--attachments` therefore re-fetches every thread that was cached without
+them, once. After that, threads are skipped again unless a recorded file is
+missing. A file that fails to download does not stop the export: it is listed in
+`manifest.json` under `attachments.failed` and retried on the next run. A single
+file larger than 100 MB is treated as a failure.
+
 ### Resumable Exports
 
 Export runs in two phases:
@@ -156,7 +199,9 @@ deplexity-export/
         ├── thread.json
         ├── thread.md
         ├── thread.pdf
-        └── sources.json
+        ├── sources.json
+        └── attachments/             # Only with --attachments
+            └── <id>-<original-name>
 ```
 
 Each space folder is self-contained — you can ZIP and share a single space without needing the top-level `threads/` directory.
@@ -255,7 +300,7 @@ Key design decisions:
 - Session tokens are stored with `0600` permissions in `~/.config/deplexity/`
 - No credentials are ever logged or transmitted to third parties
 - Requests to Perplexity use the same TLS fingerprint and headers as a real Chrome session
-- Skill bodies are downloaded from the pre-signed storage URLs (Amazon S3) that Perplexity returns; these fetches deliberately carry **no** session cookie or Perplexity headers, so your credentials are never sent off-platform
+- Skill bodies and attachments are downloaded from the pre-signed storage URLs (Amazon S3) that Perplexity returns; these fetches deliberately carry **no** session cookie or Perplexity headers, so your credentials are never sent off-platform. The pre-signed links themselves are never written to the export or to error messages
 
 ---
 
