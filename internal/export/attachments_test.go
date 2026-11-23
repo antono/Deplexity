@@ -11,6 +11,11 @@ import (
 	"github.com/clappingmonkey/deplexity/internal/models"
 )
 
+type statusErr int
+
+func (e statusErr) Error() string   { return "HTTP status" }
+func (e statusErr) HTTPStatus() int { return int(e) }
+
 type fakeGetter struct {
 	bodies map[string][]byte
 	errs   map[string]error
@@ -305,5 +310,35 @@ func TestThreadMarkdownWithoutAttachmentsIsUnchanged(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(dir, "thread.md"))
 	if strings.Contains(string(data), "Attachments") {
 		t.Errorf("thread.md mentions attachments for a thread without any:\n%s", data)
+	}
+}
+
+func TestAttachmentHookMarksDeletedFilesGoneAndDoesNotRetryThem(t *testing.T) {
+	g := &fakeGetter{errs: map[string]error{attURLA: statusErr(404), attURLB: statusErr(403)}}
+	d, _ := newDownloader(t, g)
+	var warnings int
+	d.Warn = func(string, ...any) { warnings++ }
+
+	entry := &models.Entry{Attachments: []models.Attachment{
+		{Name: "photo.jpg", URL: attURLA},
+		{Name: "photo.jpg", URL: attURLB},
+	}}
+	if err := d.Hook("", "thread-1")(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+	if a := entry.Attachments[0]; !a.Gone || a.Error != "" || a.File != "" {
+		t.Errorf("404 attachment = %+v, want Gone and no error", a)
+	}
+	if a := entry.Attachments[1]; a.Gone || a.Error == "" {
+		t.Errorf("403 attachment = %+v, want a retryable error", a)
+	}
+	if warnings != 1 {
+		t.Errorf("got %d warnings, want 1 (only the 403)", warnings)
+	}
+
+	exp := &JSONExporter{OutputDir: d.OutputDir}
+	gone := &models.Thread{UUID: "thread-1", Entries: []models.Entry{{Attachments: entry.Attachments[:1]}}}
+	if !exp.AttachmentsPresent(gone) {
+		t.Error("a thread whose only attachment is gone must not be refetched")
 	}
 }

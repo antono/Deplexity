@@ -62,6 +62,10 @@ type Attachment struct {
 	// Error describes why the download failed. Failed attachments are retried
 	// on the next run.
 	Error string `json:"error,omitempty"`
+	// Gone is set when the server no longer has the file (HTTP 404/410), for
+	// example an old upload Perplexity has since deleted. It is permanent, so
+	// the attachment is not retried on later runs.
+	Gone bool `json:"gone,omitempty"`
 	// URL is the short-lived pre-signed download link. It carries credentials,
 	// so it is never persisted.
 	URL string `json:"-"`
@@ -161,10 +165,13 @@ type ExportManifest struct {
 
 // AttachmentsSummary reports the outcome of attachment export in manifest.json.
 type AttachmentsSummary struct {
-	Enabled    bool                `json:"enabled"`
-	Complete   bool                `json:"complete"`
-	Downloaded int                 `json:"downloaded"`
-	Failed     []AttachmentFailure `json:"failed,omitempty"`
+	Enabled    bool `json:"enabled"`
+	Complete   bool `json:"complete"`
+	Downloaded int  `json:"downloaded"`
+	// Gone counts attachments Perplexity no longer has; they cannot be
+	// recovered and do not make the export incomplete.
+	Gone   int                 `json:"gone,omitempty"`
+	Failed []AttachmentFailure `json:"failed,omitempty"`
 }
 
 // AttachmentFailure identifies an attachment that could not be downloaded.

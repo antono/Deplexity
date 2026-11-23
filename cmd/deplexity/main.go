@@ -69,15 +69,15 @@ func (cmd *LoginCmd) Run(ctx context.Context) error {
 
 // ExportCmd handles data export.
 type ExportCmd struct {
-	Output     string   `short:"o" default:"deplexity-export" help:"Output directory."`
-	Format     []string `short:"f" default:"json,markdown" help:"Export formats (json, markdown, pdf)." enum:"json,markdown,pdf"`
-	Threads    bool     `help:"Export threads." default:"true" negatable:""`
-	Spaces     bool     `help:"Export spaces/collections." default:"true" negatable:""`
-	Profile    bool     `help:"Export user profile." default:"true" negatable:""`
-	Delay      int      `help:"Delay between API requests in milliseconds." default:"500"`
-	Refresh    bool     `help:"Re-fetch the thread list and updated thread details." default:"false"`
-	PDFWorkers int      `help:"Number of parallel workers for PDF generation (0 = auto-detect CPU count)." default:"0" name:"pdf-workers"`
-	Attachments bool    `help:"Download files you uploaded to threads into threads/<thread>/attachments/." default:"false"`
+	Output      string   `short:"o" default:"deplexity-export" help:"Output directory."`
+	Format      []string `short:"f" default:"json,markdown" help:"Export formats (json, markdown, pdf)." enum:"json,markdown,pdf"`
+	Threads     bool     `help:"Export threads." default:"true" negatable:""`
+	Spaces      bool     `help:"Export spaces/collections." default:"true" negatable:""`
+	Profile     bool     `help:"Export user profile." default:"true" negatable:""`
+	Delay       int      `help:"Delay between API requests in milliseconds." default:"500"`
+	Refresh     bool     `help:"Re-fetch the thread list and updated thread details." default:"false"`
+	PDFWorkers  int      `help:"Number of parallel workers for PDF generation (0 = auto-detect CPU count)." default:"0" name:"pdf-workers"`
+	Attachments bool     `help:"Download files you uploaded to threads into threads/<thread>/attachments/." default:"false"`
 
 	verbose bool // set by main before Run
 }
@@ -577,6 +577,10 @@ func summarizeAttachments(threads []models.Thread) *models.AttachmentsSummary {
 					summary.Downloaded++
 					continue
 				}
+				if a.Gone {
+					summary.Gone++
+					continue
+				}
 				summary.Complete = false
 				errText := a.Error
 				if errText == "" {
@@ -594,6 +598,9 @@ func reportAttachments(summary *models.AttachmentsSummary) {
 		return
 	}
 	fmt.Printf("Attachments: %d downloaded", summary.Downloaded)
+	if summary.Gone > 0 {
+		fmt.Printf(", %d gone from the server (deleted by Perplexity)", summary.Gone)
+	}
 	if len(summary.Failed) > 0 {
 		fmt.Printf(", %d failed (see manifest.json; re-run to retry)", len(summary.Failed))
 	}

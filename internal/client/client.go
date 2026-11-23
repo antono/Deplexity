@@ -315,6 +315,25 @@ func (c *Client) GetRawURL(ctx context.Context, rawURL string) ([]byte, error) {
 	return c.GetRawURLMax(ctx, rawURL, maxRawURLBody)
 }
 
+// RawStatusError is returned by GetRawURL/GetRawURLMax for a non-200 response,
+// so callers can tell a permanent 404 from a transient failure.
+type RawStatusError struct {
+	URL        string
+	StatusCode int
+	Body       string
+}
+
+// HTTPStatus returns the response status code.
+func (e *RawStatusError) HTTPStatus() int { return e.StatusCode }
+
+func (e *RawStatusError) Error() string {
+	body := strings.Join(strings.Fields(e.Body), " ")
+	if len(body) > 200 {
+		body = body[:200] + "…"
+	}
+	return fmt.Sprintf("unexpected response from %s: HTTP %d — %s", e.URL, e.StatusCode, body)
+}
+
 // GetRawURLMax is GetRawURL with a caller-chosen body cap in bytes. It exists
 // for payloads larger than a SKILL.md body (e.g. uploaded thread attachments);
 // an oversized body is an error, never a silently truncated file.
@@ -419,7 +438,7 @@ func (c *Client) GetRawURLMax(ctx context.Context, rawURL string, maxBody int64)
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("unexpected response from %s: HTTP %d — %s", rawURL, resp.StatusCode, string(body))
+			return nil, &RawStatusError{URL: rawURL, StatusCode: resp.StatusCode, Body: string(body)}
 		}
 
 		return body, nil

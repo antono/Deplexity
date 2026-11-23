@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -76,6 +77,13 @@ func (d *AttachmentDownloader) download(ctx context.Context, dir string, a *mode
 			return err
 		}
 		a.File, a.Size = "", 0
+		var se interface{ HTTPStatus() int }
+		if errors.As(err, &se) && (se.HTTPStatus() == http.StatusNotFound || se.HTTPStatus() == http.StatusGone) {
+			// The upload was deleted server-side: record it once, never retry.
+			a.Gone = true
+			a.Error = ""
+			return nil
+		}
 		a.Error = redactURL(err.Error(), rawURL)
 		if d.Warn != nil {
 			d.Warn("could not download attachment %q: %s", a.Name, a.Error)
@@ -188,6 +196,9 @@ func (e *JSONExporter) AttachmentsPresent(thread *models.Thread) bool {
 	dir := e.threadDir(thread)
 	for _, entry := range thread.Entries {
 		for _, a := range entry.Attachments {
+			if a.Gone {
+				continue
+			}
 			if a.Error != "" || a.File == "" {
 				return false
 			}
